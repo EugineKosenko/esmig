@@ -1,0 +1,14 @@
+#+title: Main file
+
+* File
+
+#+begin_src rust :noweb yes :mkdirp yes :tangle src/main.rs
+  <<esmig:main:Declarations>>
+
+  <<esmig:main:Definitions>>
+
+  fn main() {
+      <<esmig:main:Actions>>
+  }
+#+end_src
+

@@ -1,0 +1,25 @@
+#+title: =Cargo= configuration
+
+* =Rust= version
+
+#+begin_src toml :noweb yes :tangle rust-toolchain.toml
+  [toolchain]
+  channel = "1.90"
+#+end_src
+
+* File
+
+#+begin_src toml :noweb yes :tangle Cargo.toml
+  [package]
+  name = "esmig"
+  version = "0.1.0"
+  edition = "2021"
+
+  # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+  <<esmig:Cargo:Definitions>>
+
+  [dependencies]
+  <<esmig:Cargo:Dependencies>>
+#+end_src
+
