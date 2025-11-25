@@ -1,6 +1,16 @@
 #[macro_use] extern crate clap;
+#[macro_use] extern crate serde_json;
+
+use elasticsearch::{
+    Elasticsearch,
+    auth::Credentials,
+    http::transport::{TransportBuilder, SingleNodeConnectionPool}
+};
+
 use clap::Parser as ClapParser;
 use std::fs;
+use elasticsearch::indices::{IndicesExistsParts, IndicesCreateParts};
+use std::io::Write;
 use nom::{
     Parser as NomParser,
     character::complete::multispace0,
@@ -37,6 +47,8 @@ use nom::{
     combinator::eof
 };
 use std::env;
+use elasticsearch::{CountParts, IndexParts};
+use elasticsearch::{SearchParts, DeleteByQueryParts};
 
 #[derive(ClapParser)]
 struct Args {
@@ -47,10 +59,8 @@ struct Args {
 #[derive(Subcommand)]
 enum Commands {
     Init,
-    Gen { mgrtn: String },
-    Run { mgrtn: String },
-    Revert { mgrtn: String },
-    Redo { mgrtn: String }
+    Create { mgrtn: String },
+    Run, Revert, Redo
 }
 fn ws<'a, F, O, E>(inner: F) -> impl NomParser<&'a str, Output = O, Error = E>
 where
@@ -172,16 +182,142 @@ async fn process_mgrtn(mgrtn: &str, dir: &str) {
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
+    let es = Elasticsearch::new(
+        TransportBuilder::new(
+            SingleNodeConnectionPool::new(
+                reqwest::Url::parse(&env::var("ES_ROOT").unwrap()).unwrap()))
+            .auth(Credentials::Basic(env::var("ES_USER").unwrap(), env::var("ES_PASS").unwrap()))
+            .build().unwrap());
+    let mgrtns_index_name = format!(".{}-esmigs", env::var("CIRCUIT").unwrap());
     let args = Args::parse();
     
     match args.command {
-        Commands::Init => { unimplemented!(); },
-        Commands::Gen { _mgrtn } => { unimplemented!(); },
-        Commands::Run { mgrtn } => { process_mgrtn(&mgrtn, "up").await; },
-        Commands::Revert { mgrtn } => { process_mgrtn(&mgrtn, "down").await; },
-        Commands::Redo { mgrtn } => {
-            process_mgrtn(&mgrtn, "down").await;
-            process_mgrtn(&mgrtn, "up").await;
+        Commands::Init => {
+            let response = es.indices()
+                .exists(IndicesExistsParts::Index(&[&mgrtns_index_name]))
+                .send().await.unwrap();
+            
+            match response.status_code() {
+                reqwest::StatusCode::OK => { println!("Index created"); },
+                reqwest::StatusCode::NOT_FOUND => {
+                    println!("Create index {}", mgrtns_index_name);
+                    let response = es.indices()
+                        .create(IndicesCreateParts::Index(&mgrtns_index_name))
+                        .body(json!({
+                            "settings": {
+                                "index.hidden": true
+                            },
+                            "mappings": {
+                                "properties": {
+                                    "stamp": { "type": "date" },
+                                    "version": { "type": "keyword" }
+                                }
+                            }
+                        }))
+                        .send().await.unwrap();
+                    println!("{:?}", response.status_code());
+                },
+                code => {
+                    println!("{:?}", code);
+                    println!("{:?}", response.text().await.unwrap());
+                }
+            }
+        },
+        Commands::Create { mgrtn } => {
+            let version = chrono::Local::now().format("%Y-%m-%d-%H%M%S-0000").to_string();
+            let dir = format!("es-migrations/{}_{}", version, mgrtn);
+            fs::create_dir(&dir).unwrap();
+            let mut file = fs::File::create(format!("{}/up.esm", dir)).unwrap();
+            file.write_all("# Your ESM goes here".as_bytes()).unwrap();
+            let mut file = fs::File::create(format!("{}/down.esm", dir)).unwrap();
+            file.write_all("# This file should undo anything in `up.esm`".as_bytes()).unwrap();
+            println!("{}", dir);
+        },
+        Commands::Run => {
+            let mut mgrtns: Vec<_> = fs::read_dir("es-migrations").unwrap()
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.path().file_name().map(|name| name.to_string_lossy().to_string()))
+                .collect();
+            mgrtns.sort();
+            for mgrtn in mgrtns {
+                let version = mgrtn.split('_').next().unwrap();
+                let count = es.count(CountParts::Index(&[&mgrtns_index_name]))
+                    .body(json!({ "query": { "term": { "version": { "value": version }}}}))
+                    .send().await.unwrap()
+                    .json::<serde_json::Value>().await.unwrap()["count"].as_u64().unwrap();
+                if count == 0 {
+                    process_mgrtn(&mgrtn, "up").await;
+                
+                    let stamp = chrono::Utc::now().naive_utc();
+                    es.index(IndexParts::Index(&mgrtns_index_name))
+                      .body(json!({ "stamp": stamp, "version": version }))
+                      .send().await.unwrap();
+                }
+            }
+        },
+        Commands::Revert => {
+            let result = es.search(SearchParts::Index(&[&mgrtns_index_name]))
+                .body(json!({ "size": 1, "sort": [{ "stamp": { "order": "desc" } }] }))
+                .send().await.unwrap()
+                .json::<serde_json::Value>().await.unwrap();
+            
+            if let Some(version) = result.pointer("/hits/hits/0/_source/version").map(|v| v.as_str().unwrap()) {
+                let mgrtn = glob::glob(&format!("es-migrations/{}_*", version)).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|path| path.is_dir())
+                    .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+                    .next().unwrap();
+                
+                process_mgrtn(&mgrtn, "down").await;
+            
+                es.delete_by_query(DeleteByQueryParts::Index(&[&mgrtns_index_name]))
+                    .body(json!({ "query": { "match": { "version": version } } }))
+                    .send().await.unwrap();
+            }
+        },
+        Commands::Redo => {
+            let result = es.search(SearchParts::Index(&[&mgrtns_index_name]))
+                .body(json!({ "size": 1, "sort": [{ "stamp": { "order": "desc" } }] }))
+                .send().await.unwrap()
+                .json::<serde_json::Value>().await.unwrap();
+            
+            if let Some(version) = result.pointer("/hits/hits/0/_source/version").map(|v| v.as_str().unwrap()) {
+                let mgrtn = glob::glob(&format!("es-migrations/{}_*", version)).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|path| path.is_dir())
+                    .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+                    .next().unwrap();
+                
+                process_mgrtn(&mgrtn, "down").await;
+            
+                es.delete_by_query(DeleteByQueryParts::Index(&[&mgrtns_index_name]))
+                    .body(json!({ "query": { "match": { "version": version } } }))
+                    .send().await.unwrap();
+            }
+            let mut mgrtns: Vec<_> = fs::read_dir("es-migrations").unwrap()
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.path().file_name().map(|name| name.to_string_lossy().to_string()))
+                .collect();
+            mgrtns.sort();
+            for mgrtn in mgrtns {
+                let version = mgrtn.split('_').next().unwrap();
+                let count = es.count(CountParts::Index(&[&mgrtns_index_name]))
+                    .body(json!({ "query": { "term": { "version": { "value": version }}}}))
+                    .send().await.unwrap()
+                    .json::<serde_json::Value>().await.unwrap()["count"].as_u64().unwrap();
+                if count == 0 {
+                    process_mgrtn(&mgrtn, "up").await;
+                
+                    let stamp = chrono::Utc::now().naive_utc();
+                    es.index(IndexParts::Index(&mgrtns_index_name))
+                      .body(json!({ "stamp": stamp, "version": version }))
+                      .send().await.unwrap();
+                }
+            }
         }
     }
 }

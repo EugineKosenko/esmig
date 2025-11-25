@@ -14,3 +14,6 @@ serde_json = "*"
 dotenv = "*"
 tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "*", features = ["json"] }
+elasticsearch = "9.1.0-alpha.1"
+chrono = { version = "*", features = ["serde"] }
+glob = "*"

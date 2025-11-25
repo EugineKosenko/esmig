@@ -35,7 +35,7 @@
   nom = "*"
 #+end_src
 
-* =serde= =json=
+* =serde=
 
 #+begin_src toml :noweb-ref esmig:Cargo:Dependencies
   serde_json = "*"
@@ -57,5 +57,25 @@
 
 #+begin_src toml :noweb-ref esmig:Cargo:Dependencies
   reqwest = { version = "*", features = ["json"] }
+#+end_src
+
+* =elasticsearch=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  elasticsearch = "9.1.0-alpha.1"
+#+end_src
+
+* =chrono=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  chrono = { version = "*", features = ["serde"] }
+#+end_src
+
+* =glob=
+
+Used to find directory by prefix.
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  glob = "*"
 #+end_src
 
