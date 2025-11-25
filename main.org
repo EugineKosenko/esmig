@@ -3,12 +3,356 @@
 * File
 
 #+begin_src rust :noweb yes :mkdirp yes :tangle src/main.rs
+  #[macro_use] extern crate clap;
   <<esmig:main:Declarations>>
 
   <<esmig:main:Definitions>>
 
-  fn main() {
+  #[tokio::main]
+  async fn main() {
+      dotenv::dotenv().ok();
       <<esmig:main:Actions>>
+  }
+#+end_src
+
+* Arguments
+
+#+begin_src rust :noweb-ref esmig:main:Declarations :noweb yes
+  use clap::Parser as ClapParser;
+  use std::fs;
+#+end_src
+
+#+begin_src rust :noweb-ref esmig:main:Definitions :noweb yes
+  #[derive(ClapParser)]
+  struct Args {
+      #[command(subcommand)]
+      command: Commands,
+  }
+
+  #[derive(Subcommand)]
+  enum Commands {
+      Init,
+      Gen { mgrtn: String },
+      Run { mgrtn: String },
+      Revert { mgrtn: String },
+      Redo { mgrtn: String }
+  }
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Actions
+  let args = Args::parse();
+
+  match args.command {
+      Commands::Init => { unimplemented!(); },
+      Commands::Gen { mgrtn } => { unimplemented!(); },
+      Commands::Run { mgrtn } => { process_mgrtn(&mgrtn, "up").await; },
+      Commands::Revert { mgrtn } => { process_mgrtn(&mgrtn, "down").await; },
+      Commands::Redo { mgrtn } => {
+          process_mgrtn(&mgrtn, "down").await;
+          process_mgrtn(&mgrtn, "up").await;
+      }
+  }
+#+end_src
+
+* Whitespaces
+
+Parser ~ws~ (/W/-hite /S/-paces) matches any sequence of white spaces, which automatically wipes them
+from the code. This is a wrapper around another parser.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::{
+      Parser as NomParser,
+      character::complete::multispace0,
+      error::ParseError,
+      sequence::delimited
+  };
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn ws<'a, F, O, E>(inner: F) -> impl NomParser<&'a str, Output = O, Error = E>
+  where
+      F: NomParser<&'a str, Output = O, Error = E>,
+      E: ParseError<&'a str>,
+  {
+      delimited(multispace0, inner, multispace0)
+  }
+#+end_src
+
+* Skipped fragments
+
+There are two kinds of skipped fragments, /comments/ and /multi-space/ sequences. This is processed
+independently of ~ws~.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::{
+      IResult,
+      branch::alt,
+      character::complete::{char, not_line_ending, line_ending, multispace1},
+      combinator::map,
+      multi::many0
+  };
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn skip(input: &str) -> IResult<&str, ()> {
+      map(many0(
+          alt((
+              delimited(char('#'), not_line_ending, line_ending),
+              multispace1
+          )))
+          , |_| ()).parse(input)
+  }
+#+end_src
+
+* Method
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  #[derive(Clone, Debug)]
+  enum Method { Put, Delete }
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::{
+      bytes::complete::tag,
+      combinator::value
+  };
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn method(input: &str) -> IResult<&str, Method> {
+      alt((
+          value(Method::Put, tag("PUT")),
+          value(Method::Delete, tag("DELETE"))
+      )).parse(input)
+  }
+#+end_src
+
+* =JSON= body
+
+This implements standart =json= parser. Looks like inventing of a wheel, but the simple parentheses
+matching is not enough.
+
+** String literals
+
+String literal is just a sequence between double quotes. However, there is a nuance with escaped
+characters (like the quote itself, =cr=, =lf=, =tab= and the escape character (backslash) itself). The
+parser ~content~ processes these nuances.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::{
+      bytes::complete::escaped_transform,
+      character::complete::none_of
+  };
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn content(input: &str) -> IResult<&str, String> {
+      escaped_transform(
+          none_of("\"\\\n\r\t"), '\\',
+          alt((
+              value("\"", char('"')),
+              value("\\", char('\\')),
+              value("\n", char('n')),
+              value("\r", char('r')),
+              value("\t", char('t'))
+          ))
+      ).parse(input)
+  }
+#+end_src
+
+Parsers ~str0~ and ~str1~ match empty and non-empty strings with delimiting quotes correspondently. Here
+we wrap parsers in ~ws~ thus any string may have arbitrary whitespace delimiters.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::combinator::opt;
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn str0(input: &str) -> IResult<&str, String> {
+      ws(delimited(
+          char('"'),
+          map(opt(content), |s| s.unwrap_or_else(String::new)),
+          char('"'))
+      ).parse(input)
+  }
+
+  fn str1(input: &str) -> IResult<&str, String> {
+      ws(delimited(char('"'), content, char('"'))).parse(input)
+  }
+#+end_src
+
+** =JSON= values
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jval(input: &str) -> IResult<&str, serde_json::Value> {
+      alt((jnull, jbool, jnum, jstr, jarr, jobj)).parse(input)
+  }
+#+end_src
+
+*** =Null=
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jnull(input: &str) -> IResult<&str, serde_json::Value> {
+      map(tag("null"), |_| serde_json::Value::Null).parse(input)
+  }
+#+end_src
+
+*** Boolean
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jbool(input: &str) -> IResult<&str, serde_json::Value> {
+      map(alt((
+          value(false, tag("false")),
+          value(true, tag("true")))),
+          |b| serde_json::Value::Bool(b))
+          .parse(input)
+  }
+#+end_src
+
+*** Numbers
+
+Here we have a specific moment that ~i128~ parser consumes integers till the floating point, but ~double~
+parser consumes integers as floats. So we may not put the parsers in any order.
+
+Therefore we try to parse doubles first, but if the next sequence contains floating point or exponent
+sign.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::{
+      bytes::complete::is_not,
+      character::complete::i128,
+      combinator::peek,
+      number::complete::double
+  };
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jnum(input: &str) -> IResult<&str, serde_json::Value> {
+      let (_, ahead) = peek(is_not(" \t\n\r")).parse(input)?;
+      if ahead.contains('.') || ahead.to_lowercase().contains('e') {
+          map(double, |f| serde_json::Value::Number(serde_json::Number::from_f64(f).unwrap())).parse(input)
+      } else {
+          map(i128, |i| serde_json::Value::Number(serde_json::Number::from_i128(i).unwrap())).parse(input)
+      }
+  }
+#+end_src
+
+*** String
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jstr(input: &str) -> IResult<&str, serde_json::Value> {
+      map(str0, |s| serde_json::Value::String(s)).parse(input)
+  }
+#+end_src
+
+*** Array
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::multi::separated_list0;
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jarr(input: &str) -> IResult<&str, serde_json::Value> {
+      map(delimited(
+          ws(char('[')),
+          separated_list0(ws(char(',')), jval),
+          ws(char(']'))),
+          |a| serde_json::Value::Array(a))
+          .parse(input)
+  }
+#+end_src
+
+*** Object
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::sequence::separated_pair;
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn jobj(input: &str) -> IResult<&str, serde_json::Value> {
+      let field = separated_pair(str1, ws(char(':')), jval);
+      map(delimited(
+          ws(char('{')),
+          separated_list0(ws(char(',')), field),
+          ws(char('}'))),
+          |fields| serde_json::Value::Object(fields.into_iter().collect()))
+          .parse(input)
+  }
+#+end_src
+
+* Command
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  #[derive(Debug)]
+  struct Command(Method, String, serde_json::Value);
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::character::complete::space1;
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn command(input: &str) -> IResult<&str, Command> {
+      map((method, space1, not_line_ending, line_ending, opt(jobj)),
+          |(method, _, route, _, body)| Command(method, route.to_string(), body.unwrap_or(serde_json::Value::Null))
+      ).parse(input)
+  }
+#+end_src
+
+* Script
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  #[derive(Debug)]
+  struct Script(Vec<Command>);
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use nom::{
+      sequence::terminated,
+      combinator::eof
+  };
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  fn script(input: &str) -> IResult<&str, Script> {
+      map(terminated(many0(delimited(skip, command, skip)), eof), |cmds| Script(cmds)).parse(input)
+  }
+#+end_src
+
+* Process migration
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Definitions
+  async fn process_mgrtn(mgrtn: &str, dir: &str) {
+      let http = reqwest::Client::new();
+      <<esmig:main:process-mgrtn:Actions>>
+  }
+#+end_src
+
+Parse migration to retrieve script.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:process-mgrtn:Actions
+  let content = fs::read_to_string(format!("es-migrations/{}/{}.esm", mgrtn, dir)).unwrap();
+  let script = script(&content).unwrap().1;
+#+end_src
+
+Process script.
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:Declarations
+  use std::env;
+#+end_src
+
+#+begin_src rust :noweb yes :noweb-ref esmig:main:process-mgrtn:Actions
+  for Command(method, route, body) in script.0 {
+      let route = route.replace("{circuit}", &env::var("CIRCUIT").unwrap());
+      let url = format!("{}{}", env::var("ES_ROOT").unwrap(), route);
+      let request = match method {
+          Method::Put => http.put(url).json(&body),
+          Method::Delete => http.delete(url)
+      };
+      let response = request
+          .basic_auth(env::var("ES_USER").unwrap(), Some(env::var("ES_PASS").unwrap()))
+          .send().await.unwrap();
+      println!("{:?}", response.json::<serde_json::Value>().await.unwrap());
   }
 #+end_src
 

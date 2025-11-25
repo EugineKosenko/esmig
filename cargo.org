@@ -23,3 +23,39 @@
   <<esmig:Cargo:Dependencies>>
 #+end_src
 
+* =clap=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  clap = { version = "*", features = ["derive"] }
+#+end_src
+
+* =nom=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  nom = "*"
+#+end_src
+
+* =serde= =json=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  serde_json = "*"
+#+end_src
+
+* =dotenv=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  dotenv = "*"
+#+end_src
+
+* =tokio=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
+#+end_src
+
+* =reqwest=
+
+#+begin_src toml :noweb-ref esmig:Cargo:Dependencies
+  reqwest = { version = "*", features = ["json"] }
+#+end_src
+

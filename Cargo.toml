@@ -8,3 +8,9 @@ edition = "2021"
 
 
 [dependencies]
+clap = { version = "*", features = ["derive"] }
+nom = "*"
+serde_json = "*"
+dotenv = "*"
+tokio = { version = "*", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "*", features = ["json"] }
