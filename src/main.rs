@@ -26,6 +26,8 @@ use elasticsearch::{
     http::transport::{TransportBuilder, SingleNodeConnectionPool}
 };
 
+use std::env;
+
 use clap::Parser as ClapParser;
 use std::fs;
 use elasticsearch::indices::{IndicesExistsParts, IndicesCreateParts};
@@ -65,10 +67,9 @@ use nom::{
     sequence::terminated,
     combinator::eof
 };
-use std::env;
 use elasticsearch::{CountParts, IndexParts};
 use elasticsearch::{SearchParts, DeleteByQueryParts};
-
+    
 #[derive(ClapParser)]
 struct Args {
     #[command(subcommand)]
@@ -97,9 +98,10 @@ fn skip(input: &str) -> IResult<&str, ()> {
         , |_| ()).parse(input)
 }
 #[derive(Clone, Debug)]
-enum Method { Put, Delete }
+enum Method { Post, Put, Delete }
 fn method(input: &str) -> IResult<&str, Method> {
     alt((
+        value(Method::Post, tag("POST")),
         value(Method::Put, tag("PUT")),
         value(Method::Delete, tag("DELETE"))
     )).parse(input)
@@ -114,7 +116,7 @@ fn content(input: &str) -> IResult<&str, String> {
             value("\r", char('r')),
             value("\t", char('t'))
         ))
-    ).parse(input)
+    ).parse(input).map(|(input, result)| (input, result.replace("{circuit}", &env::var("CIRCUIT").unwrap())))
 }
 fn str0(input: &str) -> IResult<&str, String> {
     ws(delimited(
@@ -188,6 +190,7 @@ async fn process_mgrtn(mgrtn: &str, dir: &str) {
         let route = route.replace("{circuit}", &env::var("CIRCUIT").unwrap());
         let url = format!("{}{}", env::var("ES_ROOT").unwrap(), route);
         let request = match method {
+            Method::Post => http.post(url).json(&body),
             Method::Put => http.put(url).json(&body),
             Method::Delete => http.delete(url)
         };
@@ -266,6 +269,7 @@ async fn main() {
                     .body(json!({ "query": { "term": { "version": { "value": version }}}}))
                     .send().await.unwrap()
                     .json::<serde_json::Value>().await.unwrap()["count"].as_u64().unwrap();
+                
                 if count == 0 {
                     process_mgrtn(&mgrtn, "up").await;
                 
@@ -328,6 +332,7 @@ async fn main() {
                     .body(json!({ "query": { "term": { "version": { "value": version }}}}))
                     .send().await.unwrap()
                     .json::<serde_json::Value>().await.unwrap()["count"].as_u64().unwrap();
+                
                 if count == 0 {
                     process_mgrtn(&mgrtn, "up").await;
                 
